@@ -65,6 +65,7 @@ interface Path {
   endLng: number;
   color: string;
   dashLength?: number;
+  altitude?: number;
 }
 
 interface CountryBar {
@@ -317,9 +318,9 @@ export default function App() {
   const [viewMode, setViewMode] = useState<'all' | 'air' | 'marine' | 'strikes'>('all');
   
   // API Keys (Placeholders)
-  const [acledKey, setAcledKey] = useState(process.env.VITE_ACLED_KEY || '');
-  const [acledEmail, setAcledEmail] = useState(process.env.VITE_ACLED_EMAIL || '');
-  const [aisKey, setAisKey] = useState(process.env.VITE_AIS_KEY || '');
+  const [acledKey, setAcledKey] = useState(import.meta.env.VITE_ACLED_KEY || '');
+  const [acledEmail, setAcledEmail] = useState(import.meta.env.VITE_ACLED_EMAIL || '');
+  const [aisKey, setAisKey] = useState(import.meta.env.VITE_AIS_KEY || '');
   const [isRotating, setIsRotating] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [isLoadingIntel, setIsLoadingIntel] = useState(false);
@@ -329,19 +330,22 @@ export default function App() {
     setIsLoadingIntel(true);
     setIntelError(null);
     try {
-      const data = await fetchConflictIntel();
-      if (data.events.length > 0) {
+      const response = await fetch('/api/intel');
+      if (!response.ok) throw new Error('Failed to fetch intel');
+      const data = await response.json();
+      
+      if (data.events && data.events.length > 0) {
         setMarkers(data.events);
-        setAlerts(data.alerts.map(a => ({
+        setAlerts(data.alerts.map((a: any) => ({
           ...a,
           timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z'
         })));
         
         // Update traffic
         if (data.traffic) {
-          setPaths(prev => [...data.traffic.flights]);
+          setPaths(data.traffic.flights || []);
           // Add vessels as assets
-          const vesselAssets: Asset[] = data.traffic.vessels.map((v, i) => ({
+          const vesselAssets: Asset[] = (data.traffic.vessels || []).map((v: any, i: number) => ({
             id: `VESSEL-${i}`,
             lat: v.lat,
             lng: v.lng,
@@ -364,11 +368,17 @@ export default function App() {
 
   // === IRAN CONFLICT REAL DATA INTEGRATION ===
   
-  // 1. Air Traffic (OpenSky)
+  // 1. Air Traffic (Backend Proxy)
   useEffect(() => {
     const fetchAirTraffic = async () => {
-      const data = await fetchOpenSkyData();
-      setFlights(data);
+      try {
+        const response = await fetch('/api/traffic/air');
+        if (!response.ok) throw new Error('Failed to fetch air traffic');
+        const data = await response.json();
+        setFlights(data);
+      } catch (err) {
+        console.error('Air Traffic Error:', err);
+      }
     };
     
     fetchAirTraffic();
@@ -418,44 +428,54 @@ export default function App() {
     return () => socket.close();
   }, [aisKey]);
 
-  // 3. Strike Events (ACLED)
+  // 3. Strike Events (Backend Proxy)
   useEffect(() => {
     const fetchStrikes = async () => {
       if (!acledKey || !acledEmail) return;
-      const data = await fetchACLEDData(acledKey, acledEmail);
-      setAcledEvents(data);
-      
-      // Convert ACLED events to markers
-      const strikeMarkers: IncidentMarker[] = data.map(event => ({
-        id: event.data_id,
-        lat: event.latitude,
-        lng: event.longitude,
-        type: 'strike',
-        label: `STRIKE: ${event.location}`,
-        details: event.notes,
-        intensity: event.fatalities > 10 ? 'Critical' : 'High'
-      }));
-      
-      if (strikeMarkers.length > 0) {
-        setMarkers(prev => {
-          const existingIds = new Set(prev.map(m => m.id));
-          const newOnes = strikeMarkers.filter(m => !existingIds.has(m.id));
-          return [...prev, ...newOnes];
+      try {
+        const response = await fetch('/api/traffic/strikes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: acledKey, email: acledEmail })
         });
+        if (!response.ok) throw new Error('Failed to fetch strikes');
+        const data = await response.json();
+        setAcledEvents(data);
         
-        // Add pattern alerts for new strikes
-        const latest = data[0];
-        if (latest) {
-          const newAlert: Alert = {
-            id: `acled-${latest.data_id}`,
-            type: 'CRISIS',
-            title: 'STRIKE DETECTED',
-            message: `${latest.actor1} strike on ${latest.location} (${latest.country}) - ${latest.fatalities} fatalities reported.`,
-            timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z',
-            severity: 'high'
-          };
-          setAlerts(prev => [newAlert, ...prev.slice(0, 5)]);
+        // Convert ACLED events to markers
+        const strikeMarkers: IncidentMarker[] = data.map((event: any) => ({
+          id: event.data_id,
+          lat: event.latitude,
+          lng: event.longitude,
+          type: 'strike',
+          label: `STRIKE: ${event.location}`,
+          details: event.notes,
+          intensity: event.fatalities > 10 ? 'Critical' : 'High'
+        }));
+        
+        if (strikeMarkers.length > 0) {
+          setMarkers(prev => {
+            const existingIds = new Set(prev.map(m => m.id));
+            const newOnes = strikeMarkers.filter(m => !existingIds.has(m.id));
+            return [...prev, ...newOnes];
+          });
+          
+          // Add pattern alerts for new strikes
+          const latest = data[0];
+          if (latest) {
+            const newAlert: Alert = {
+              id: `acled-${latest.data_id}`,
+              type: 'CRISIS',
+              title: 'STRIKE DETECTED',
+              message: `${latest.actor1} strike on ${latest.location} (${latest.country}) - ${latest.fatalities} fatalities reported.`,
+              timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z',
+              severity: 'high'
+            };
+            setAlerts(prev => [newAlert, ...prev.slice(0, 5)]);
+          }
         }
+      } catch (err) {
+        console.error('Strike Data Error:', err);
       }
     };
 
