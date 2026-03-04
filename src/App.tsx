@@ -28,7 +28,15 @@ import {
 } from 'lucide-react';
 import GlobeView from './components/GlobeView';
 import { cn } from './lib/utils';
-import { fetchConflictIntel, GeopoliticalEvent, IntelligenceAlert } from './services/intelService';
+import { 
+  fetchConflictIntel, 
+  GeopoliticalEvent, 
+  IntelligenceAlert,
+  fetchOpenSkyData,
+  fetchACLEDData,
+  FlightState,
+  ACLEDEvent
+} from './services/intelService';
 
 // Types
 interface Alert {
@@ -68,10 +76,16 @@ interface CountryBar {
 }
 
 interface RestrictedZone {
-  id: string;
-  coords: [number, number][][];
-  color: string;
-  label: string;
+  type: 'Feature';
+  properties: {
+    id: string;
+    label: string;
+    color: string;
+  };
+  geometry: {
+    type: 'Polygon';
+    coordinates: number[][][];
+  };
 }
 
 interface IncidentMarker {
@@ -154,28 +168,32 @@ const generateMockBars = (): CountryBar[] => {
 
 const generateRestrictedZones = (): RestrictedZone[] => [
   {
-    id: 'zone-me',
-    label: 'RESTRICTED AIRSPACE: MIDDLE EAST',
-    color: 'rgba(255, 0, 0, 0.3)',
-    coords: [[
-      [25, 30], [35, 30], [35, 40], [25, 40], [25, 30]
-    ]]
+    type: 'Feature',
+    properties: {
+      id: 'zone-me',
+      label: 'RESTRICTED AIRSPACE: MIDDLE EAST',
+      color: 'rgba(239, 68, 68, 0.2)',
+    },
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [34, 31], [34, 33], [36, 33], [36, 31], [34, 31]
+      ]]
+    }
   },
   {
-    id: 'zone-ua',
-    label: 'NO-FLY ZONE: EASTERN EUROPE',
-    color: 'rgba(255, 0, 0, 0.3)',
-    coords: [[
-      [45, 25], [55, 25], [55, 45], [45, 45], [45, 25]
-    ]]
-  },
-  {
-    id: 'zone-rs',
-    label: 'MARITIME EXCLUSION: RED SEA',
-    color: 'rgba(255, 100, 0, 0.3)',
-    coords: [[
-      [12, 40], [20, 38], [25, 35], [20, 32], [12, 40]
-    ]]
+    type: 'Feature',
+    properties: {
+      id: 'zone-ua',
+      label: 'NO-FLY ZONE: EASTERN EUROPE',
+      color: 'rgba(239, 68, 68, 0.2)',
+    },
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [22, 44], [22, 52], [40, 52], [40, 44], [22, 44]
+      ]]
+    }
   }
 ];
 
@@ -291,24 +309,160 @@ export default function App() {
   const [bars, setBars] = useState<CountryBar[]>([]);
   const [zones, setZones] = useState<RestrictedZone[]>([]);
   const [markers, setMarkers] = useState<IncidentMarker[]>(generateIncidentMarkers());
+  const [acledEvents, setAcledEvents] = useState<ACLEDEvent[]>([]);
+  const [flights, setFlights] = useState<FlightState[]>([]);
+  const [ships, setShips] = useState<any[]>([]);
   const [selectedMarker, setSelectedMarker] = useState<IncidentMarker | null>(null);
   const [activePanel, setActivePanel] = useState<'none' | 'stats' | 'alerts'>('none');
+  const [viewMode, setViewMode] = useState<'all' | 'air' | 'marine' | 'strikes'>('all');
+  
+  // API Keys (Placeholders)
+  const [acledKey, setAcledKey] = useState(process.env.VITE_ACLED_KEY || '');
+  const [acledEmail, setAcledEmail] = useState(process.env.VITE_ACLED_EMAIL || '');
+  const [aisKey, setAisKey] = useState(process.env.VITE_AIS_KEY || '');
   const [isRotating, setIsRotating] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [isLoadingIntel, setIsLoadingIntel] = useState(false);
+  const [intelError, setIntelError] = useState<string | null>(null);
 
   const refreshIntel = async () => {
     setIsLoadingIntel(true);
-    const data = await fetchConflictIntel();
-    if (data.events.length > 0) {
-      setMarkers(data.events);
-      setAlerts(data.alerts.map(a => ({
-        ...a,
-        timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z'
-      })));
+    setIntelError(null);
+    try {
+      const data = await fetchConflictIntel();
+      if (data.events.length > 0) {
+        setMarkers(data.events);
+        setAlerts(data.alerts.map(a => ({
+          ...a,
+          timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z'
+        })));
+        
+        // Update traffic
+        if (data.traffic) {
+          setPaths(prev => [...data.traffic.flights]);
+          // Add vessels as assets
+          const vesselAssets: Asset[] = data.traffic.vessels.map((v, i) => ({
+            id: `VESSEL-${i}`,
+            lat: v.lat,
+            lng: v.lng,
+            alt: 0.01,
+            type: 'sea',
+            color: v.type === 'military' ? '#ef4444' : '#06b6d4',
+            label: v.label
+          }));
+          setAssets(prev => [...prev.filter(a => !a.id.startsWith('VESSEL-')), ...vesselAssets]);
+        }
+      } else {
+        setIntelError("No live data found. Using cached situation report.");
+      }
+    } catch (err) {
+      console.error("API Error:", err);
+      setIntelError("Failed to connect to intelligence stream. Using cached data.");
     }
     setIsLoadingIntel(false);
   };
+
+  // === IRAN CONFLICT REAL DATA INTEGRATION ===
+  
+  // 1. Air Traffic (OpenSky)
+  useEffect(() => {
+    const fetchAirTraffic = async () => {
+      const data = await fetchOpenSkyData();
+      setFlights(data);
+    };
+    
+    fetchAirTraffic();
+    const interval = setInterval(fetchAirTraffic, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // 2. Marine Traffic (AISStream WebSocket)
+  useEffect(() => {
+    if (!aisKey) return;
+
+    const socket = new WebSocket('wss://stream.aisstream.io/v0/stream');
+
+    socket.onopen = () => {
+      const subscriptionMessage = {
+        APIKey: aisKey,
+        BoundingBoxes: [[[23, 46], [32, 58]]], // Persian Gulf / Strait of Hormuz
+        FiltersShipMMSI: [],
+        FilterShipName: [],
+        FilterShipType: []
+      };
+      socket.send(JSON.stringify(subscriptionMessage));
+    };
+
+    socket.onmessage = (event) => {
+      const aisMessage = JSON.parse(event.data);
+      if (aisMessage.MessageType === 'PositionReport') {
+        const { Message, MetaData } = aisMessage;
+        const newShip = {
+          mmsi: Message.PositionReport.Mmsi,
+          name: MetaData.ShipName.trim() || `MMSI: ${Message.PositionReport.Mmsi}`,
+          lat: Message.PositionReport.Latitude,
+          lng: Message.PositionReport.Longitude,
+          speed: Message.PositionReport.Sog,
+          heading: Message.PositionReport.TrueHeading,
+          timestamp: MetaData.time_utc
+        };
+
+        setShips(prev => {
+          const filtered = prev.filter(s => s.mmsi !== newShip.mmsi);
+          return [...filtered, newShip].slice(-100); // Keep last 100 ships
+        });
+      }
+    };
+
+    socket.onerror = (err) => console.error('AIS WebSocket Error:', err);
+    return () => socket.close();
+  }, [aisKey]);
+
+  // 3. Strike Events (ACLED)
+  useEffect(() => {
+    const fetchStrikes = async () => {
+      if (!acledKey || !acledEmail) return;
+      const data = await fetchACLEDData(acledKey, acledEmail);
+      setAcledEvents(data);
+      
+      // Convert ACLED events to markers
+      const strikeMarkers: IncidentMarker[] = data.map(event => ({
+        id: event.data_id,
+        lat: event.latitude,
+        lng: event.longitude,
+        type: 'strike',
+        label: `STRIKE: ${event.location}`,
+        details: event.notes,
+        intensity: event.fatalities > 10 ? 'Critical' : 'High'
+      }));
+      
+      if (strikeMarkers.length > 0) {
+        setMarkers(prev => {
+          const existingIds = new Set(prev.map(m => m.id));
+          const newOnes = strikeMarkers.filter(m => !existingIds.has(m.id));
+          return [...prev, ...newOnes];
+        });
+        
+        // Add pattern alerts for new strikes
+        const latest = data[0];
+        if (latest) {
+          const newAlert: Alert = {
+            id: `acled-${latest.data_id}`,
+            type: 'CRISIS',
+            title: 'STRIKE DETECTED',
+            message: `${latest.actor1} strike on ${latest.location} (${latest.country}) - ${latest.fatalities} fatalities reported.`,
+            timestamp: new Date().toISOString().split('T')[1].split('.')[0] + 'Z',
+            severity: 'high'
+          };
+          setAlerts(prev => [newAlert, ...prev.slice(0, 5)]);
+        }
+      }
+    };
+
+    fetchStrikes();
+    const interval = setInterval(fetchStrikes, 300000); // 5 minutes
+    return () => clearInterval(interval);
+  }, [acledKey, acledEmail]);
 
   // Initialize data
   useEffect(() => {
@@ -364,6 +518,9 @@ export default function App() {
           labels={COUNTRY_LABELS}
           isRotating={isRotating}
           onMarkerClick={(m) => setSelectedMarker(m)}
+          flights={flights}
+          ships={ships}
+          viewMode={viewMode}
         />
       </div>
 
@@ -470,13 +627,13 @@ export default function App() {
           <div className="hidden md:flex flex-col gap-1">
             <div className="flex items-center justify-between text-[10px] font-mono font-bold">
               <span className="text-slate-400 uppercase tracking-tighter">Geopolitical Risk Index</span>
-              <span className="text-orange-400">ELEVATED</span>
+              <span className="text-red-500 animate-pulse">SEVERE (300%)</span>
             </div>
             <div className="w-48 h-1.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
               <motion.div 
                 initial={{ width: 0 }}
-                animate={{ width: '68%' }}
-                className="h-full bg-orange-500 shadow-[0_0_10px_rgba(249,115,22,0.3)]"
+                animate={{ width: '100%' }}
+                className="h-full bg-red-600 shadow-[0_0_15px_rgba(220,38,38,0.5)]"
               />
             </div>
           </div>
@@ -485,6 +642,11 @@ export default function App() {
         <div className="flex items-center gap-4 md:gap-8">
           <div className="flex flex-col items-end">
             <div className="flex items-center gap-2">
+              {intelError && (
+                <span className="hidden sm:block text-[8px] font-mono text-red-500 uppercase animate-pulse mr-2">
+                  {intelError}
+                </span>
+              )}
               <button 
                 onClick={refreshIntel}
                 disabled={isLoadingIntel}
@@ -506,8 +668,57 @@ export default function App() {
               <span className="text-[10px] font-mono text-white/40 uppercase">Data Stream</span>
               <span className="text-sm font-mono font-bold text-green-400">VERIFIED</span>
             </div>
-            <div className="p-2 hover:bg-white/5 rounded-sm transition-colors cursor-pointer">
+            <div className="flex gap-1 bg-slate-900/60 p-1 border border-slate-800 rounded-sm">
+              {(['all', 'air', 'marine', 'strikes'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => setViewMode(mode)}
+                  className={cn(
+                    "px-2 py-1 text-[8px] font-mono uppercase transition-colors rounded-sm",
+                    viewMode === mode ? "bg-cyan-500 text-black font-bold" : "text-slate-400 hover:bg-white/5"
+                  )}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+            <div className="p-2 hover:bg-white/5 rounded-sm transition-colors cursor-pointer group relative">
               <Settings className="w-5 h-5 text-white/60" />
+              <div className="absolute top-full right-0 mt-2 w-64 bg-slate-950 border border-slate-800 p-4 rounded-sm shadow-2xl hidden group-hover:block z-[100]">
+                <p className="text-[10px] font-mono text-cyan-500 mb-3 uppercase tracking-widest">API Configuration</p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[8px] font-mono text-slate-500 uppercase block mb-1">ACLED Key</label>
+                    <input 
+                      type="password" 
+                      value={acledKey} 
+                      onChange={(e) => setAcledKey(e.target.value)}
+                      placeholder="Enter ACLED Key"
+                      className="w-full bg-slate-900 border border-slate-800 text-[10px] font-mono px-2 py-1 outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[8px] font-mono text-slate-500 uppercase block mb-1">ACLED Email</label>
+                    <input 
+                      type="text" 
+                      value={acledEmail} 
+                      onChange={(e) => setAcledEmail(e.target.value)}
+                      placeholder="Enter ACLED Email"
+                      className="w-full bg-slate-900 border border-slate-800 text-[10px] font-mono px-2 py-1 outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[8px] font-mono text-slate-500 uppercase block mb-1">AISStream Key</label>
+                    <input 
+                      type="password" 
+                      value={aisKey} 
+                      onChange={(e) => setAisKey(e.target.value)}
+                      placeholder="Enter AIS Key"
+                      className="w-full bg-slate-900 border border-slate-800 text-[10px] font-mono px-2 py-1 outline-none focus:border-cyan-500"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -544,9 +755,9 @@ export default function App() {
               
               <div className="grid grid-cols-2 gap-3">
                 {[
-                  { label: 'Reported Incidents', count: '42', color: 'text-cyan-400' },
-                  { label: 'Maritime Alerts', count: '3', color: 'text-orange-400' },
-                  { label: 'Restricted Zones', count: '12', color: 'text-yellow-400' },
+                  { label: 'Air Assets', count: flights.length.toString(), color: 'text-cyan-400' },
+                  { label: 'Marine Assets', count: ships.length.toString(), color: 'text-orange-400' },
+                  { label: 'Strike Events', count: acledEvents.length.toString(), color: 'text-red-500' },
                   { label: 'Regional Shifts', count: '8', color: 'text-indigo-400' },
                 ].map((stat) => (
                   <div key={stat.label} className="bg-slate-900/40 p-2 border border-slate-800 rounded-sm">
@@ -573,29 +784,29 @@ export default function App() {
 
               <div className="info-panel p-4 flex-1 overflow-hidden flex flex-col mt-2 border-slate-800 bg-slate-900/20">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">
-                  <span className="text-xs font-display font-bold text-cyan-400 uppercase tracking-wider">Active Monitoring Areas</span>
-                  <Activity className="w-4 h-4 text-cyan-400" />
+                  <span className="text-xs font-display font-bold text-red-500 uppercase tracking-wider">Live Conflict Events</span>
+                  <Zap className="w-4 h-4 text-red-500 animate-pulse" />
                 </div>
                 <div className="space-y-4 overflow-y-auto pr-2">
-                  {[
-                    { region: 'Gaza Strip', status: 'Ongoing Conflict', risk: 'Severe', icon: Zap },
-                    { region: 'Red Sea', status: 'Maritime Threat', risk: 'High', icon: Anchor },
-                    { region: 'Eastern Ukraine', status: 'Frontline Activity', risk: 'Extreme', icon: Shield },
-                    { region: 'Taiwan Strait', status: 'Regional Tension', risk: 'Moderate', icon: Activity },
-                  ].map((w, i) => (
-                    <div key={i} className="flex items-center gap-3 p-2 bg-slate-800/20 rounded-sm border border-slate-800">
-                      <w.icon className="w-5 h-5 text-cyan-400/60" />
-                      <div className="flex-1">
-                        <p className="text-[11px] font-bold text-slate-200">{w.region}</p>
-                        <div className="flex justify-between text-[10px] font-mono text-slate-500">
-                          <span>{w.status}</span>
-                          <span className={cn(
-                            w.risk === 'Extreme' ? 'text-red-400' : 'text-orange-400'
-                          )}>{w.risk}</span>
-                        </div>
+                  {acledEvents.length > 0 ? acledEvents.slice(0, 10).map((event, i) => (
+                    <div key={event.data_id} className="flex flex-col gap-1 p-2 bg-slate-800/20 rounded-sm border border-slate-800/50">
+                      <div className="flex justify-between items-start">
+                        <span className="text-[9px] font-mono text-red-400 font-bold uppercase">{event.event_type}</span>
+                        <span className="text-[8px] font-mono text-slate-500">{event.event_date}</span>
+                      </div>
+                      <p className="text-[10px] font-bold text-slate-200 leading-tight">{event.location}, {event.country}</p>
+                      <p className="text-[9px] text-slate-400 line-clamp-2 italic">{event.notes}</p>
+                      <div className="flex justify-between items-center mt-1">
+                        <span className="text-[8px] font-mono text-slate-500 uppercase">Fatalities: {event.fatalities}</span>
+                        <span className="text-[8px] font-mono text-orange-500 uppercase">Actor: {event.actor1}</span>
                       </div>
                     </div>
-                  ))}
+                  )) : (
+                    <div className="flex flex-col items-center justify-center h-full text-slate-600 font-mono text-[10px] text-center p-4">
+                      <p>NO LIVE ACLED DATA DETECTED</p>
+                      <p className="mt-2 opacity-50 italic">Configure API keys in settings to activate real-time conflict stream</p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
